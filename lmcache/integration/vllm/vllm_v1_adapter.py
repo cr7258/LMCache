@@ -36,7 +36,7 @@ from lmcache.integration.vllm.utils import (
 from lmcache.integration.vllm.vllm_service_factory import VllmServiceFactory
 from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor, PrometheusLogger
-from lmcache.utils import CacheStoreEvent, _lmcache_nvtx_annotate, cdiv
+from lmcache.utils import CacheStoreEvent, _lmcache_nvtx_annotate
 from lmcache.v1.cache_engine import LMCacheEngine
 from lmcache.v1.compute.blend import LMCBlenderBuilder
 from lmcache.v1.config import LMCacheEngineConfig
@@ -327,7 +327,8 @@ class ReqMeta:
 
         skip_leading_tokens = tracker.num_saved_tokens
         chunk_boundary = (
-            cdiv(tracker.num_saved_tokens + 1, lmcache_chunk_size) * lmcache_chunk_size
+            utils.cdiv(tracker.num_saved_tokens + 1, lmcache_chunk_size)
+            * lmcache_chunk_size
         )
 
         # NOTE(vladnosiv): for disagg, you cannot skip saving, as saving is a transfer
