@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -1821,6 +1821,20 @@ class PrometheusLogger:
             labels["served_model_name"] = metadata.served_model_name
         return labels
 
+    @staticmethod
+    def _metadata_diff(
+        old_metadata: LMCacheMetadata, new_metadata: LMCacheMetadata
+    ) -> Dict[str, tuple[Any, Any]]:
+        """Return field-level differences between two metadata instances."""
+        diffs: Dict[str, tuple[Any, Any]] = {}
+        for meta_field in fields(LMCacheMetadata):
+            field_name = meta_field.name
+            old_value = getattr(old_metadata, field_name)
+            new_value = getattr(new_metadata, field_name)
+            if old_value != new_value:
+                diffs[field_name] = (old_value, new_value)
+        return diffs
+
     _instance = None
 
     @staticmethod
@@ -1833,10 +1847,21 @@ class PrometheusLogger:
         # assert PrometheusLogger._instance.metadata == metadata, \
         #    "PrometheusLogger instance already created with different metadata"
         if PrometheusLogger._instance.metadata != metadata:
+            metadata_diffs = PrometheusLogger._metadata_diff(
+                PrometheusLogger._instance.metadata,
+                metadata,
+            )
             logger.error(
                 "PrometheusLogger instance already created with "
                 "different metadata. This should not happen except "
                 "in test"
+            )
+            logger.error(
+                "PrometheusLogger metadata mismatch details: old_labels=%s, "
+                "new_labels=%s, changed_fields=%s",
+                PrometheusLogger._instance.labels,
+                PrometheusLogger._metadata_to_labels(metadata),
+                metadata_diffs,
             )
         return PrometheusLogger._instance
 
