@@ -638,6 +638,21 @@ class LMCacheConnectorV1Impl:
                 # the current value of `attr_name`
                 # to avoid issues with late binding in closures.
                 metric.set_function(lambda name=attr_name: len(getattr(self, name)))
+                logger.debug(
+                    "Connector metrics callback registered: role=%s, metric=%s, "
+                    "source_attr=%s",
+                    self._role,
+                    metric_name,
+                    attr_name,
+                )
+            else:
+                logger.debug(
+                    "Connector metrics callback skipped (missing attr): role=%s, "
+                    "metric=%s, source_attr=%s",
+                    self._role,
+                    metric_name,
+                    attr_name,
+                )
 
     def get_inference_info(self) -> dict:
         """Get inference information including vLLM config and related details.
@@ -1387,6 +1402,11 @@ class LMCacheConnectorV1Impl:
 
             tmp_disagg_tracker[request.request_id] = disagg_spec
         self._unfinished_requests[request.request_id] = request
+        logger.debug(
+            "Scheduler unfinished_requests updated: action=add, req_id=%s, size=%d",
+            request.request_id,
+            len(self._unfinished_requests),
+        )
 
         if request.request_id not in self.load_specs:
             # No KV tokens from external KV cache, return
@@ -1443,7 +1463,14 @@ class LMCacheConnectorV1Impl:
 
         for finished_req_id in scheduler_output.finished_req_ids:
             self._request_trackers.pop(finished_req_id, None)
-            self._unfinished_requests.pop(finished_req_id, None)
+            removed_request = self._unfinished_requests.pop(finished_req_id, None)
+            if removed_request is not None:
+                logger.debug(
+                    "Scheduler unfinished_requests updated: action=remove, req_id=%s, "
+                    "size=%d",
+                    finished_req_id,
+                    len(self._unfinished_requests),
+                )
 
         # We should load KV for:
         # 1. new requests
