@@ -565,6 +565,7 @@ class LMCacheConnectorV1Impl:
         self.force_skip_save = bool(os.environ.get("LMCACHE_FORCE_SKIP_SAVE", False))
         self._requests_priority: dict[str, int] = {}
         self._invalid_block_ids: set[int] = set()
+        self._connector_metrics_by_attr: dict[str, Any] = {}
 
     def _check_legacy_register_kv_caches(self) -> None:
         """Check for legacy connector without register_kv_caches implementation."""
@@ -613,6 +614,7 @@ class LMCacheConnectorV1Impl:
     def _setup_metrics(self):
         """Setup metrics for monitoring data structures in the connector."""
         prometheus_logger = PrometheusLogger.GetInstanceOrNone()
+        self._connector_metrics_by_attr = {}
         if prometheus_logger is None:
             logger.warning(
                 "PrometheusLogger is not initialized, "
@@ -633,13 +635,19 @@ class LMCacheConnectorV1Impl:
 
         for attr_name, metric_name in metrics_map.items():
             if hasattr(self, attr_name):
-                metric = getattr(prometheus_logger, metric_name)
-                # Use a default argument in the lambda to capture
-                # the current value of `attr_name`
-                # to avoid issues with late binding in closures.
-                metric.set_function(lambda name=attr_name: len(getattr(self, name)))
+                metric = getattr(prometheus_logger, metric_name, None)
+                if metric is None:
+                    logger.debug(
+                        "Connector metric missing on logger: role=%s, metric=%s, "
+                        "source_attr=%s",
+                        self._role,
+                        metric_name,
+                        attr_name,
+                    )
+                    continue
+                self._connector_metrics_by_attr[attr_name] = metric
                 logger.debug(
-                    "Connector metrics callback registered: role=%s, metric=%s, "
+                    "Connector metrics bound: role=%s, metric=%s, "
                     "source_attr=%s",
                     self._role,
                     metric_name,
@@ -653,6 +661,17 @@ class LMCacheConnectorV1Impl:
                     metric_name,
                     attr_name,
                 )
+        self._refresh_connector_metrics()
+
+    def _refresh_connector_metric(self, attr_name: str) -> None:
+        metric = self._connector_metrics_by_attr.get(attr_name)
+        if metric is None:
+            return
+        metric.set(len(getattr(self, attr_name)))
+
+    def _refresh_connector_metrics(self) -> None:
+        for attr_name in self._connector_metrics_by_attr:
+            self._refresh_connector_metric(attr_name)
 
     def get_inference_info(self) -> dict:
         """Get inference information including vLLM config and related details.
@@ -739,6 +758,7 @@ class LMCacheConnectorV1Impl:
                 ]
 
         self._build_kv_layer_groups()
+        self._refresh_connector_metric("kv_caches")
 
     ####################
     # Worker side APIs
@@ -750,6 +770,7 @@ class LMCacheConnectorV1Impl:
         #  not called, we should consider removing it.
         assert len(self.kv_caches) == 0 and len(kv_caches) > 0
         self.kv_caches = kv_caches
+        self._refresh_connector_metric("kv_caches")
         self._build_kv_layer_groups()
         self._manager.post_init()
 
@@ -789,6 +810,7 @@ class LMCacheConnectorV1Impl:
         assert self.lmcache_engine is not None
 
         self.layerwise_retrievers = []
+        self._refresh_connector_metric("layerwise_retrievers")
 
         for idx, request in enumerate(metadata.requests):
             if request.load_spec is None or not request.load_spec.can_load:
@@ -850,6 +872,7 @@ class LMCacheConnectorV1Impl:
                     next(layerwise_retriever)
                     next(layerwise_retriever)
                     self.layerwise_retrievers.append(layerwise_retriever)
+                    self._refresh_connector_metric("layerwise_retrievers")
             else:
                 ret_token_mask = self.lmcache_engine.retrieve(
                     tokens[:lmcache_cached_tokens],
@@ -888,6 +911,7 @@ class LMCacheConnectorV1Impl:
                         slot_mapping[:lmcache_cached_tokens],
                     )
                     self._invalid_block_ids.update(missing_blocks)
+                    self._refresh_connector_metric("_invalid_block_ids")
 
     def record_failed_blocks(
         self,
@@ -1216,6 +1240,7 @@ class LMCacheConnectorV1Impl:
     def get_block_ids_with_load_errors(self) -> set[int]:
         invalid_blocks = self._invalid_block_ids.copy()
         self._invalid_block_ids.clear()
+        self._refresh_connector_metric("_invalid_block_ids")
         return invalid_blocks
 
     @_lmcache_nvtx_annotate
@@ -1278,6 +1303,7 @@ class LMCacheConnectorV1Impl:
         else:
             logger.debug(f"Looking up cache for the first time for request {req_id}!")
             self._requests_priority[req_id] = getattr(request, "priority", 0)
+            self._refresh_connector_metric("_requests_priority")
 
             # token_ids = request.prompt_token_ids
             # all token ids covers the preemption case
@@ -1355,6 +1381,7 @@ class LMCacheConnectorV1Impl:
             lmcache_cached_tokens=num_external_hit_tokens,
             can_load=False,
         )
+        self._refresh_connector_metric("load_specs")
 
         if below_min_retrieve or need_to_allocate <= 0:
             return 0
@@ -1402,6 +1429,7 @@ class LMCacheConnectorV1Impl:
 
             tmp_disagg_tracker[request.request_id] = disagg_spec
         self._unfinished_requests[request.request_id] = request
+        self._refresh_connector_metric("_unfinished_requests")
         logger.debug(
             "Scheduler unfinished_requests updated: action=add, req_id=%s, size=%d",
             request.request_id,
@@ -1442,6 +1470,7 @@ class LMCacheConnectorV1Impl:
         )
 
         self.load_specs[request.request_id].can_load = True
+        self._refresh_connector_metric("load_specs")
 
     @_lmcache_nvtx_annotate
     def build_connector_meta(
@@ -1462,9 +1491,12 @@ class LMCacheConnectorV1Impl:
         meta = LMCacheConnectorMetadata()
 
         for finished_req_id in scheduler_output.finished_req_ids:
-            self._request_trackers.pop(finished_req_id, None)
+            removed_tracker = self._request_trackers.pop(finished_req_id, None)
+            if removed_tracker is not None:
+                self._refresh_connector_metric("_request_trackers")
             removed_request = self._unfinished_requests.pop(finished_req_id, None)
             if removed_request is not None:
+                self._refresh_connector_metric("_unfinished_requests")
                 logger.debug(
                     "Scheduler unfinished_requests updated: action=remove, req_id=%s, "
                     "size=%d",
@@ -1482,6 +1514,8 @@ class LMCacheConnectorV1Impl:
             if request.req_id.startswith("mock_req"):
                 continue
             load_spec = self.load_specs.pop(request.req_id, None)
+            if load_spec is not None:
+                self._refresh_connector_metric("load_specs")
             num_tokens_to_compute = (
                 request.num_computed_tokens
                 + scheduler_output.num_scheduled_tokens[request.req_id]
@@ -1490,6 +1524,7 @@ class LMCacheConnectorV1Impl:
             if load_spec is not None:
                 lmcache_cached_tokens = load_spec.lmcache_cached_tokens
             request_priority = self._requests_priority.pop(request.req_id, 0)
+            self._refresh_connector_metric("_requests_priority")
 
             skip_save = force_skip_save or (
                 self.config.priority_limit is not None
@@ -1504,6 +1539,7 @@ class LMCacheConnectorV1Impl:
                 skip_save,
             )
             self._request_trackers[request.req_id] = request_tracker
+            self._refresh_connector_metric("_request_trackers")
 
             req_meta = ReqMeta.from_request_tracker(
                 request_tracker,
@@ -1524,6 +1560,8 @@ class LMCacheConnectorV1Impl:
         if isinstance(cached_reqs, list):
             for i, req in enumerate(cached_reqs):
                 load_spec = self.load_specs.pop(req.req_id, None)
+                if load_spec is not None:
+                    self._refresh_connector_metric("load_specs")
                 lmcache_cached_tokens = 0
                 vllm_cached_tokens = 0
                 if load_spec is not None:
@@ -1561,6 +1599,7 @@ class LMCacheConnectorV1Impl:
                 )
                 if req_meta is not None:
                     meta.add_request(req_meta)
+            self._refresh_connector_metrics()
             return meta
 
         for i, req_id in enumerate(cached_reqs.req_ids):
@@ -1585,6 +1624,8 @@ class LMCacheConnectorV1Impl:
             new_block_ids = cached_reqs.new_block_ids[i]
 
             load_spec = self.load_specs.pop(req_id, None)
+            if load_spec is not None:
+                self._refresh_connector_metric("load_specs")
             lmcache_cached_tokens = 0
             vllm_cached_tokens = 0
             if load_spec is not None:
@@ -1685,6 +1726,7 @@ class LMCacheConnectorV1Impl:
             if req_meta is not None:
                 meta.add_request(req_meta)
 
+        self._refresh_connector_metrics()
         return meta
 
     @_lmcache_nvtx_annotate
