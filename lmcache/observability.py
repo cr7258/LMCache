@@ -1851,40 +1851,83 @@ class PrometheusLogger:
         )
 
     @staticmethod
+    def _create_label_view(
+        base_logger: "PrometheusLogger",
+        metadata: LMCacheMetadata,
+    ) -> "PrometheusLogger":
+        """
+        Create a logger view with different labels while reusing existing
+        Prometheus collectors from base_logger.
+        """
+        label_view = object.__new__(PrometheusLogger)
+        label_view.metadata = metadata
+        label_view.config = base_logger.config
+        label_view.labels = PrometheusLogger._metadata_to_labels(metadata)
+        label_view._counters = base_logger._counters
+        label_view._histograms = base_logger._histograms
+
+        # Rebind dynamic gauge children to new labels while reusing collectors.
+        for attr_name, attr_value in base_logger.__dict__.items():
+            if attr_name in {
+                "metadata",
+                "config",
+                "labels",
+                "_counters",
+                "_histograms",
+            }:
+                continue
+
+            parent_metric = getattr(attr_value, "_parent", None)
+            if parent_metric is not None:
+                try:
+                    rebound_value = parent_metric.labels(**label_view.labels)
+                except Exception:
+                    rebound_value = attr_value
+                setattr(label_view, attr_name, rebound_value)
+            else:
+                setattr(label_view, attr_name, attr_value)
+
+        return label_view
+
+    @staticmethod
     def GetOrCreate(
         metadata: LMCacheMetadata,
         config: Optional["LMCacheEngineConfig"] = None,
     ) -> "PrometheusLogger":
-        # Backward compatibility: some tests set _instance = None directly.
-        if PrometheusLogger._instance is None and PrometheusLogger._instances:
-            PrometheusLogger._instances = {}
-
         metadata_key = PrometheusLogger._metadata_to_key(metadata)
-        if metadata_key not in PrometheusLogger._instances:
-            PrometheusLogger._instances[metadata_key] = PrometheusLogger(
-                metadata, config=config
-            )
+        if metadata_key in PrometheusLogger._instances:
+            logger_instance = PrometheusLogger._instances[metadata_key]
+            if logger_instance.metadata != metadata:
+                metadata_diffs = PrometheusLogger._metadata_diff(
+                    logger_instance.metadata,
+                    metadata,
+                )
+                logger.error(
+                    "PrometheusLogger instance already created with "
+                    "different metadata for the same labels key."
+                )
+                logger.error(
+                    "PrometheusLogger metadata mismatch details: old_labels=%s, "
+                    "new_labels=%s, changed_fields=%s",
+                    logger_instance.labels,
+                    PrometheusLogger._metadata_to_labels(metadata),
+                    metadata_diffs,
+                )
+            return logger_instance
 
-        logger_instance = PrometheusLogger._instances[metadata_key]
         if PrometheusLogger._instance is None:
+            # First logger owns collector creation.
+            logger_instance = PrometheusLogger(metadata, config=config)
             PrometheusLogger._instance = logger_instance
-
-        if logger_instance.metadata != metadata:
-            metadata_diffs = PrometheusLogger._metadata_diff(
-                logger_instance.metadata,
+        else:
+            # Subsequent loggers are label views that reuse existing collectors.
+            logger_instance = PrometheusLogger._create_label_view(
+                PrometheusLogger._instance,
                 metadata,
             )
-            logger.error(
-                "PrometheusLogger instance already created with "
-                "different metadata for the same labels key."
-            )
-            logger.error(
-                "PrometheusLogger metadata mismatch details: old_labels=%s, "
-                "new_labels=%s, changed_fields=%s",
-                logger_instance.labels,
-                PrometheusLogger._metadata_to_labels(metadata),
-                metadata_diffs,
-            )
+
+        PrometheusLogger._instances[metadata_key] = logger_instance
+
         return logger_instance
 
     @staticmethod
@@ -1933,7 +1976,9 @@ def reset_observability_metrics() -> None:
     """
 
     if PrometheusLogger._instances:
-        for prometheus_logger in PrometheusLogger._instances.values():
+        for prometheus_logger in {
+            id(logger): logger for logger in PrometheusLogger._instances.values()
+        }.values():
             prometheus_logger.reset_counters()
             prometheus_logger.reset_histograms()
         return
