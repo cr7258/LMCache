@@ -613,10 +613,15 @@ class LMCacheConnectorV1Impl:
 
     def _setup_metrics(self):
         """Setup metrics for monitoring data structures in the connector."""
-        metadata = self.lmcache_engine_metadata
+        connector_role = (
+            self._role.name.lower() if hasattr(self._role, "name") else str(self._role)
+        )
+        metadata = self._manager.get_metadata_for_role(connector_role)
         prometheus_logger = None
         if metadata is not None:
-            prometheus_logger = PrometheusLogger.GetOrCreate(metadata, config=self.config)
+            prometheus_logger = PrometheusLogger.GetOrCreate(
+                metadata, config=self.config
+            )
         self._connector_metrics_by_attr = {}
         if prometheus_logger is None:
             logger.warning(

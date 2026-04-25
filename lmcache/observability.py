@@ -921,6 +921,7 @@ class PrometheusLogger:
         # List to track all counters/histograms for reset methods
         self._counters: List[prometheus_client.Counter] = []
         self._histograms: List[prometheus_client.Histogram] = []
+        self._metric_collectors: Dict[str, Any] = {}
 
         self.counter_num_retrieve_requests = self._create_counter(
             name="lmcache:num_retrieve_requests",
@@ -1586,12 +1587,14 @@ class PrometheusLogger:
         ]
 
         for metric_name in connector_metrics:
-            gauge = self._gauge_cls(
+            gauge_collector = self._gauge_cls(
                 name=f"lmcache:{metric_name}",
                 documentation=f"The count of {metric_name.replace('_', ' ')}",
                 labelnames=labelnames,
                 multiprocess_mode="livemostrecent",
-            ).labels(**self.labels)
+            )
+            gauge = gauge_collector.labels(**self.labels)
+            self._metric_collectors[metric_name] = gauge_collector
             setattr(self, metric_name, gauge)
 
         # PeriodicThread metrics
@@ -1865,6 +1868,7 @@ class PrometheusLogger:
         label_view.labels = PrometheusLogger._metadata_to_labels(metadata)
         label_view._counters = base_logger._counters
         label_view._histograms = base_logger._histograms
+        label_view._metric_collectors = base_logger._metric_collectors
 
         # Rebind dynamic gauge children to new labels while reusing collectors.
         for attr_name, attr_value in base_logger.__dict__.items():
@@ -1874,7 +1878,17 @@ class PrometheusLogger:
                 "labels",
                 "_counters",
                 "_histograms",
+                "_metric_collectors",
             }:
+                continue
+
+            metric_collector = base_logger._metric_collectors.get(attr_name)
+            if metric_collector is not None:
+                try:
+                    rebound_value = metric_collector.labels(**label_view.labels)
+                except Exception:
+                    rebound_value = attr_value
+                setattr(label_view, attr_name, rebound_value)
                 continue
 
             parent_metric = getattr(attr_value, "_parent", None)

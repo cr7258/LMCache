@@ -79,6 +79,7 @@ class LMCacheManager:
 
         self._health_monitor: Optional[HealthMonitor] = None
         self._lmcache_engine_metadata: Optional[LMCacheMetadata] = None
+        self._metadata_by_role: dict[str, LMCacheMetadata] = {}
         self._lmcache_engine: Optional[LMCacheEngine] = None
         self._lookup_client: Optional[LookupClientInterface] = None
         self._lookup_server: Optional[
@@ -91,6 +92,9 @@ class LMCacheManager:
         # Initialize components via service factory
         try:
             self._lmcache_engine_metadata = service_factory.get_or_create_metadata()
+            service_role = getattr(service_factory, "role", None)
+            if self._lmcache_engine_metadata is not None and service_role is not None:
+                self._metadata_by_role[str(service_role)] = self._lmcache_engine_metadata
             self._lmcache_engine = service_factory.get_or_create_lmcache_engine()
             self._lookup_client = service_factory.maybe_create_lookup_client()
             self._lookup_server = service_factory.maybe_create_lookup_server()
@@ -121,6 +125,10 @@ class LMCacheManager:
     def lmcache_engine_metadata(self) -> Optional[LMCacheMetadata]:
         """Get the LMCache engine metadata."""
         return self._lmcache_engine_metadata
+
+    def get_metadata_for_role(self, role: str) -> Optional[LMCacheMetadata]:
+        """Get role-specific metadata created by the service factory."""
+        return self._metadata_by_role.get(role, self._lmcache_engine_metadata)
 
     @property
     def lookup_client(self) -> Optional[LookupClientInterface]:
