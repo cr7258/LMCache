@@ -1836,34 +1836,56 @@ class PrometheusLogger:
         return diffs
 
     _instance = None
+    _instances: Dict[tuple[str, str, str, str], "PrometheusLogger"] = {}
+
+    @staticmethod
+    def _metadata_to_key(
+        metadata: LMCacheMetadata,
+    ) -> tuple[str, str, str, str]:
+        labels = PrometheusLogger._metadata_to_labels(metadata)
+        return (
+            str(labels.get("model_name", "")),
+            str(labels.get("served_model_name", "")),
+            str(labels.get("worker_id", "")),
+            str(labels.get("role", "")),
+        )
 
     @staticmethod
     def GetOrCreate(
         metadata: LMCacheMetadata,
         config: Optional["LMCacheEngineConfig"] = None,
     ) -> "PrometheusLogger":
+        # Backward compatibility: some tests set _instance = None directly.
+        if PrometheusLogger._instance is None and PrometheusLogger._instances:
+            PrometheusLogger._instances = {}
+
+        metadata_key = PrometheusLogger._metadata_to_key(metadata)
+        if metadata_key not in PrometheusLogger._instances:
+            PrometheusLogger._instances[metadata_key] = PrometheusLogger(
+                metadata, config=config
+            )
+
+        logger_instance = PrometheusLogger._instances[metadata_key]
         if PrometheusLogger._instance is None:
-            PrometheusLogger._instance = PrometheusLogger(metadata, config=config)
-        # assert PrometheusLogger._instance.metadata == metadata, \
-        #    "PrometheusLogger instance already created with different metadata"
-        if PrometheusLogger._instance.metadata != metadata:
+            PrometheusLogger._instance = logger_instance
+
+        if logger_instance.metadata != metadata:
             metadata_diffs = PrometheusLogger._metadata_diff(
-                PrometheusLogger._instance.metadata,
+                logger_instance.metadata,
                 metadata,
             )
             logger.error(
                 "PrometheusLogger instance already created with "
-                "different metadata. This should not happen except "
-                "in test"
+                "different metadata for the same labels key."
             )
             logger.error(
                 "PrometheusLogger metadata mismatch details: old_labels=%s, "
                 "new_labels=%s, changed_fields=%s",
-                PrometheusLogger._instance.labels,
+                logger_instance.labels,
                 PrometheusLogger._metadata_to_labels(metadata),
                 metadata_diffs,
             )
-        return PrometheusLogger._instance
+        return logger_instance
 
     @staticmethod
     def GetInstance() -> "PrometheusLogger":
@@ -1878,6 +1900,8 @@ class PrometheusLogger:
         Returns the singleton instance of PrometheusLogger if it exists,
         otherwise returns None.
         """
+        if PrometheusLogger._instance is None and PrometheusLogger._instances:
+            PrometheusLogger._instance = next(iter(PrometheusLogger._instances.values()))
         return PrometheusLogger._instance
 
     @thread_safe
@@ -1907,6 +1931,12 @@ def reset_observability_metrics() -> None:
     """
     Reset observability metrics to their initial state.
     """
+
+    if PrometheusLogger._instances:
+        for prometheus_logger in PrometheusLogger._instances.values():
+            prometheus_logger.reset_counters()
+            prometheus_logger.reset_histograms()
+        return
 
     prometheus_logger = PrometheusLogger.GetInstanceOrNone()
     if prometheus_logger is not None:

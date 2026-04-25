@@ -284,9 +284,11 @@ def _cleanup_prometheus_logger():
     """Reset PrometheusLogger singleton and metrics between tests."""
     LMCStatsMonitor.unregister_all_metrics()
     PrometheusLogger._instance = None
+    PrometheusLogger._instances = {}
     yield
     LMCStatsMonitor.unregister_all_metrics()
     PrometheusLogger._instance = None
+    PrometheusLogger._instances = {}
 
 
 def _make_metadata():
